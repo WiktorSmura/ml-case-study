@@ -1,0 +1,14 @@
+line-length = 127
+indent-width = 4
+target-version = "py312"
+
+[format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[lint]
+select = ["I", "E9", "F63", "F7", "F82", "E", "W", "F"]
+fixable = ["ALL"]
+unfixable = []

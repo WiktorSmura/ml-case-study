@@ -1,0 +1,39 @@
+name: Pre-commit Checks
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    env:
+      APP_ID: ${{ secrets.GITHUB_ACCESS_APP_ID }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Generate GitHub App token
+        if: ${{ env.APP_ID != '' }}
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.GITHUB_ACCESS_APP_ID }}
+          private-key: ${{ secrets.GITHUB_ACCESS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Configure Git for Private Module Access
+        if: ${{ steps.app-token.outputs.token }}
+        run: |
+          git config --global url."https://actions:${{ steps.app-token.outputs.token }}@github.com".insteadOf https://github.com
+
+      - name: Install mise and tools
+        uses: jdx/mise-action@v3
+        with:
+          experimental: "false"
+
+      - name: Run pre-commit
+        run: |
+          mise run pre-commit

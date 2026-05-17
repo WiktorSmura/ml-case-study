@@ -1,0 +1,84 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# Python bytecode/cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Dash / Flask local files
+instance/
+.webassets-cache
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Type checking / linting caches
+.mypy_cache/
+.pyre/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+
+# Logs
+*.log
+logs/
+
+# IDEs / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local data exports or generated files
+data/processed/*.tmp
+data/processed/*.bak
+data/processed/*.parquet
+data/processed/*.xlsx
+data/raw/*.tmp
+data/raw/*.bak
+
+# Keep these project files tracked
+!requirements.txt
+!README.md
+!Procfile
+!render.yaml
+
+# Optional: uncomment if raw/processed data should NOT be committed
+data/raw/*.csv
+data/raw/*.gif
+data/processed/*.csv
+!data/raw/.keep
+!data/processed/.keep
+!data/README.md
