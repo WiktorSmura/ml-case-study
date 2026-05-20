@@ -72,6 +72,7 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 TargetMode = Literal["finished_binary", "all_binary", "multiclass"]
 SplitMode = Literal["time", "stratified_cv", "time_cv"]
+MissingValuePolicy = Literal["explicit", "model_impute"]
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,9 @@ class CzechFinancialConfig:
         Drop zero-variance columns from X before modeling.
     drop_duplicate_features:
         Drop exact duplicate feature columns, keeping the first occurrence.
+    missing_value_policy:
+        "explicit" returns an X matrix with no NaN values by encoding missingness directly.
+        "model_impute" keeps ordinary NaNs for the sklearn preprocessor to impute.
     random_state:
         Deterministic seed for downstream models/splits.
     """
@@ -147,6 +151,7 @@ class CzechFinancialConfig:
     drop_static_redundant_features: bool = True
     drop_constant_features: bool = True
     drop_duplicate_features: bool = True
+    missing_value_policy: MissingValuePolicy = "explicit"
     random_state: int = 42
 
 
@@ -350,6 +355,131 @@ def drop_duplicate_features(df: pd.DataFrame) -> pd.DataFrame:
 
     out = out.drop(columns=to_drop, errors="ignore")
     out.attrs["dropped_exact_duplicate_columns"] = to_drop
+    return out
+
+
+# ---------------------------------------------------------------------
+# Missing-value policy
+# ---------------------------------------------------------------------
+
+_TRANSACTION_PREFIX_RE = re.compile(r"^(hist_|tx_\d+_\d+d_)")
+
+
+def _transaction_prefixes(columns: Sequence[str]) -> List[str]:
+    """Return transaction feature prefixes such as hist_ or tx_1_30d_."""
+    prefixes = sorted({m.group(1) for c in columns if (m := _TRANSACTION_PREFIX_RE.match(str(c)))})
+    return prefixes
+
+
+def _fill_transaction_missing_values(X: pd.DataFrame) -> pd.DataFrame:
+    """Fill NaNs caused by left-joining transaction aggregates.
+
+    Why NaNs appear:
+    A loan may have no transactions in a specific pre-loan window, for example
+    no activity in days 31-90 before the loan. After a left merge, the whole
+    transaction block for that window is missing. That is not an unknown value;
+    it means "no observed activity in this window".
+
+    Policy:
+    - Create {prefix}has_activity from {prefix}tx_count.
+    - Fill all transaction features in that prefix with 0.
+    The activity flag distinguishes true zero values from no-window-activity cases.
+    """
+    out = X.copy()
+    for prefix in _transaction_prefixes(out.columns):
+        cols = [c for c in out.columns if str(c).startswith(prefix)]
+        count_col = f"{prefix}tx_count"
+        if count_col in out.columns:
+            out[count_col] = pd.to_numeric(out[count_col], errors="coerce").fillna(0)
+            out[f"{prefix}has_activity"] = out[count_col].gt(0).astype("int8")
+        numeric_cols = [c for c in cols if pd.api.types.is_numeric_dtype(out[c])]
+        if numeric_cols:
+            out[numeric_cols] = out[numeric_cols].fillna(0)
+    return out
+
+
+def _fill_card_missing_values(X: pd.DataFrame) -> pd.DataFrame:
+    """Fill NaNs caused by accounts without pre-loan cards.
+
+    No card before the loan is a meaningful absence, not an unknown value.
+    Therefore card count is 0, latest card type is NO_CARD, and card age is 0.
+    """
+    out = X.copy()
+    if "card_count_before_loan" in out.columns:
+        out["card_count_before_loan"] = pd.to_numeric(out["card_count_before_loan"], errors="coerce").fillna(0)
+    if "latest_card_type_before_loan" in out.columns:
+        out["latest_card_type_before_loan"] = out["latest_card_type_before_loan"].astype("string").fillna("NO_CARD")
+    if "days_since_latest_card" in out.columns:
+        out["days_since_latest_card"] = pd.to_numeric(out["days_since_latest_card"], errors="coerce").fillna(0)
+    return out
+
+
+def _fill_structural_binary_missing_values(X: pd.DataFrame) -> pd.DataFrame:
+    """Fill simple composition flags/counts where missing means absent/not observed."""
+    out = X.copy()
+    structural_zero_cols = [
+        c
+        for c in out.columns
+        if (
+            str(c).endswith("_count")
+            or str(c).endswith("_count_before_loan")
+            or str(c).startswith("has_")
+            or str(c).endswith("_has_activity")
+            or str(c) in {"client_count", "disponent_count", "owner_same_as_account_district"}
+        )
+        and pd.api.types.is_numeric_dtype(out[c])
+    ]
+    if structural_zero_cols:
+        out[structural_zero_cols] = out[structural_zero_cols].fillna(0)
+    return out
+
+
+def apply_explicit_missing_policy(X: pd.DataFrame) -> pd.DataFrame:
+    """Return a feature matrix with no NaNs using explicit, explainable encoding.
+
+    This solves the common confusion where replacing literal `np.nan` in code does
+    not remove NaNs. Most NaNs are produced dynamically by pandas operations:
+    left joins with no matching aggregate rows, groupby statistics on empty groups,
+    failed date parsing, or missing categorical values.
+
+    Encoding rules:
+    1. Transaction-window absence -> fill block with 0 and add has_activity flag.
+    2. No pre-loan card -> card_count=0, latest_card_type=NO_CARD, days_since_latest_card=0.
+    3. Categorical unknowns -> "__missing__".
+    4. Remaining numeric unknowns -> add <column>__was_missing indicator, then fill 0.
+
+    The final matrix is safe for classifiers that cannot consume NaNs, while still
+    preserving missingness information through explicit indicator columns.
+    """
+    out = X.copy()
+    out = out.replace([np.inf, -np.inf], np.nan)
+
+    out = _fill_transaction_missing_values(out)
+    out = _fill_card_missing_values(out)
+    out = _fill_structural_binary_missing_values(out)
+
+    # Fill categorical missing values explicitly.
+    cat_cols = out.select_dtypes(include=["object", "string", "category", "bool"]).columns.tolist()
+    for col in cat_cols:
+        out[col] = out[col].astype("string").fillna("__missing__")
+
+    # Remaining numeric NaNs are true unknown/undefined values. Preserve an indicator.
+    numeric_cols = out.select_dtypes(include=[np.number]).columns.tolist()
+    for col in numeric_cols:
+        missing_mask = out[col].isna()
+        if missing_mask.any():
+            out[f"{col}__was_missing"] = missing_mask.astype("int8")
+            out[col] = out[col].fillna(0)
+
+    # If extension dtypes still contain pd.NA, handle them too.
+    remaining_missing = out.columns[out.isna().any()].tolist()
+    for col in remaining_missing:
+        if pd.api.types.is_numeric_dtype(out[col]):
+            out[f"{col}__was_missing"] = out[col].isna().astype("int8")
+            out[col] = out[col].fillna(0)
+        else:
+            out[col] = out[col].astype("string").fillna("__missing__")
+
     return out
 
 
@@ -1110,6 +1240,11 @@ def final_cleanup_features(
         }:
             X[col] = X[col].astype("string")
 
+    if config.missing_value_policy == "explicit":
+        X = apply_explicit_missing_policy(X)
+    elif config.missing_value_policy != "model_impute":
+        raise ValueError(f"Unknown missing_value_policy: {config.missing_value_policy}")
+
     X = rare_category_grouping(X, min_count=config.min_category_count)
 
     if config.drop_static_redundant_features:
@@ -1149,6 +1284,16 @@ def validate_feature_matrix(X: pd.DataFrame, metadata: pd.DataFrame) -> None:
 
     if any(pd.api.types.is_datetime64_any_dtype(X[c]) for c in X.columns):
         raise ValueError("Raw datetime columns found in X. Convert them to age/window features first.")
+
+
+def validate_no_missing_values(X: pd.DataFrame) -> None:
+    """Raise an error if the final feature matrix still contains missing values."""
+    missing_cols = X.columns[X.isna().any()].tolist()
+    if missing_cols:
+        preview = missing_cols[:20]
+        raise ValueError(
+            f"Feature matrix still contains missing values in {len(missing_cols)} columns. First columns: {preview}"
+        )
 
 
 def audit_transaction_time_filter(
@@ -1250,6 +1395,8 @@ def build_classification_dataset(
 
     X, y, metadata = final_cleanup_features(df, config)
     validate_feature_matrix(X, metadata)
+    if config.missing_value_policy == "explicit":
+        validate_no_missing_values(X)
     return X, y, metadata
 
 
@@ -1554,6 +1701,7 @@ def quick_data_quality_report(X: pd.DataFrame, y: pd.Series, metadata: pd.DataFr
         "loan_date_max": metadata["loan_date"].max() if "loan_date" in metadata else None,
         "missingness_top_20": X.isna().mean().sort_values(ascending=False).head(20).to_dict(),
         "duplicate_loan_ids": int(metadata["loan_id"].duplicated().sum()) if "loan_id" in metadata else None,
+        "n_missing_cells_in_X": int(X.isna().sum().sum()),
     }
 
 
@@ -1571,6 +1719,7 @@ __all__ = [
     "build_classification_dataset",
     "build_dataset_bundle",
     "quick_data_quality_report",
+    "apply_explicit_missing_policy",
     "temporal_train_test_split",
     "temporal_train_valid_test_split",
     "make_preprocessor",
@@ -1579,6 +1728,7 @@ __all__ = [
     "threshold_table",
     "get_feature_names",
     "validate_feature_matrix",
+    "validate_no_missing_values",
     "audit_transaction_time_filter",
     "run_example",
 ]
