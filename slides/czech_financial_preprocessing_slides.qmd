@@ -1,0 +1,385 @@
+---
+title: "Czech Financial Dataset: Preprocessing Pipeline"
+subtitle: "From relational banking tables to a leakage-safe classification dataset"
+author: ""
+date: ""
+format:
+  revealjs:
+    theme: simple
+    slide-number: true
+    chalkboard: true
+    preview-links: false
+    transition: fade
+    controls: true
+    progress: true
+    width: 1280
+    height: 720
+    margin: 0.08
+    smaller: false
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+## 1. Goal of preprocessing
+
+::: {.columns}
+::: {.column width="55%"}
+**Input:** relational banking dataset
+
+- accounts
+- clients
+- transactions
+- cards
+- districts
+- loans
+
+**Output:** one clean classification table
+:::
+
+::: {.column width="45%"}
+```text
+X        = feature matrix
+y        = good / bad loan
+metadata = audit columns
+```
+
+**Core idea:**
+
+> one row = one loan
+:::
+:::
+
+::: {.notes}
+Start by saying that the raw dataset is not one flat CSV. It is a relational banking dataset, so preprocessing is the main part of the project. The aim was to create one model-ready table where every row is one loan and the target tells us whether the loan was good or bad.
+:::
+
+## 2. Why one row per loan?
+
+The business question is:
+
+> Can we predict loan risk at the time the loan is granted?
+
+Therefore:
+
+```text
+loan_id = one training example
+loan.status = target
+```
+
+Default target:
+
+```text
+A → 0  finished loan, no repayment problems
+B → 1  finished loan, repayment problems
+```
+
+::: {.notes}
+Explain that this is why the final dataset is built around the loan table, not the transaction table. We use `finished_binary` as the main target because A and B are final outcomes. Other statuses exist, but they describe still-running contracts, so they are less clean for the main experiment.
+:::
+
+## 3. Main risk: data leakage
+
+A model must not see the future.
+
+Example:
+
+```text
+Loan granted: 1997-01-01
+Transaction from: 1998-05-01
+```
+
+If we use that transaction, the model may indirectly learn whether the loan was repaid.
+
+**Rule:** use only information available before `loan_date`.
+
+::: {.notes}
+This is the most important slide. Say that leakage would make the model look unrealistically good. Future transactions can reveal repayment behavior, so all event-based features are filtered relative to the loan date.
+:::
+
+## 4. Leakage-safe rules
+
+```text
+Transactions: trans_date < loan_date
+Cards:        issued_date < loan_date
+Orders:       disabled by default
+```
+
+Why disable orders?
+
+```text
+The order table has no date column.
+```
+
+So we cannot prove whether an order existed before the loan decision.
+
+::: {.notes}
+Mention that same-day transactions and cards are also excluded because we only know the day, not the exact timestamp. If something happened on the same day as the loan, we cannot be sure whether it happened before or after approval.
+:::
+
+## 5. Pipeline overview
+
+```text
+Load raw tables
+      ↓
+Normalize schemas and dates
+      ↓
+Build loan-level features
+      ↓
+Apply leakage filters
+      ↓
+Handle missing values explicitly
+      ↓
+Remove redundant features
+      ↓
+Train / validation / test split
+```
+
+::: {.notes}
+Use this as a roadmap. The rest of the presentation walks through these steps one by one. Emphasize that preprocessing is not just technical cleanup; every step has a reason.
+:::
+
+## 6. Step 1 — normalize raw tables
+
+The pipeline standardizes each table:
+
+- clean column names
+- strip blanks and placeholder values
+- parse mixed date formats
+- normalize category codes
+- convert numeric columns
+
+Examples:
+
+```text
+PRIJEM → credit
+VYDAJ  → debit
+birth_number → birth_date + gender
+```
+
+::: {.notes}
+Explain that different versions of the dataset may store columns slightly differently. Normalization makes later feature engineering reliable and easier to explain.
+:::
+
+## 7. Step 2 — loan and account features
+
+Kept features:
+
+```text
+loan_amount
+loan_duration_months
+account_age_days_at_loan
+account_statement_frequency
+```
+
+Not kept:
+
+```text
+monthly_payment
+payment_x_duration
+payment_to_amount_ratio
+```
+
+Because they duplicate loan amount and duration.
+
+::: {.notes}
+This addresses the team’s correlation comment. Some features were not leakage, but they were mathematically redundant. So the new pipeline avoids creating these duplicate views of the same loan contract.
+:::
+
+## 8. Step 3 — owner and client features
+
+The owner is the most important client for loan risk.
+
+Kept features:
+
+```text
+client_count
+disponent_count
+has_disponent
+owner_age_years_at_loan
+owner_gender
+owner_same_as_account_district
+```
+
+Avoided broad aggregates:
+
+```text
+age_mean, age_min, age_max, age_std
+```
+
+::: {.notes}
+Say that broad client aggregates often collapse to the same thing as owner age, especially when there is one owner. The pipeline keeps compact owner-focused features instead.
+:::
+
+## 9. Step 4 — district features
+
+We keep a curated socioeconomic profile:
+
+```text
+region
+average_salary
+unemployment_rate96
+ratio_urban
+num_entrep_per1000
+num_inhabitants_log1p
+crime_rate96_per_1000
+```
+
+Instead of joining every raw district column.
+
+::: {.notes}
+Explain that raw district columns contain many related counts. We choose interpretable features and transform crime count into crime rate because crime count depends heavily on population size.
+:::
+
+## 10. Step 5 — transaction features
+
+**Goal:** summarize pre-loan account behavior.
+
+**What we aggregate:**
+
+- money in / money out
+- balance health
+- negative-balance behavior
+- payment behavior
+
+**Output:** one compact summary per loan.
+
+::: {.notes}
+Do not show feature-name examples on the slide because they make it overflow. Say them verbally if needed: credit amount sum, debit amount sum, net cashflow sum, minimum balance, negative balance rate, and cash withdrawal rate. The important concept is that individual transactions are not model rows; they are aggregated into loan-level behavior before the loan date.
+:::
+
+## 11. Step 6 — non-overlapping windows
+
+Old cumulative windows caused high correlation:
+
+```text
+w30  = last 30 days
+w90  = last 90 days
+w180 = last 180 days
+w365 = last 365 days
+```
+
+New window design:
+
+```text
+tx_1_30d
+tx_31_90d
+tx_91_180d
+tx_181_365d
+```
+
+Each window describes a separate period.
+
+::: {.notes}
+This is another response to the team’s feedback. Cumulative windows overlap by design, so many features become correlated. Non-overlapping windows make the feature groups easier to interpret.
+:::
+
+## 12. Step 7 — explicit missing-value policy
+
+Final `X` should have:
+
+```text
+0 NaN values
+0 empty-string values
+```
+
+Encoding rules:
+
+```text
+No transactions in window → 0 + has_activity = 0
+No card before loan       → NO_CARD
+Unknown numeric value     → 0 + was_missing flag
+Unknown category          → "__missing__"
+```
+
+::: {.notes}
+Explain the teammate’s NaN issue. NaNs came mainly from left joins and empty groups, not from literal `np.nan` in the code. The fix was to make missingness meaningful and explicit.
+:::
+
+## 13. Step 8 — redundancy cleanup
+
+The pipeline avoids or removes:
+
+- deterministic loan duplicates
+- zero-variance columns
+- exact duplicate columns
+- broad crosstabs
+- repeated point-in-time window features
+
+No `CorrelationPruner` is needed.
+
+**Principle:** create meaningful features from the start.
+
+::: {.notes}
+Say that we do not try to automatically remove all correlated columns. Some correlation is natural in banking data. The focus is removing artificial duplicates and making feature engineering intentional.
+:::
+
+## 14. Step 9 — validation checks
+
+Automatic checks confirm:
+
+```text
+one row per loan
+no target/status in X
+no raw IDs in X
+no raw datetime columns in X
+no NaNs in explicit mode
+transaction cutoff respected
+```
+
+If a rule is violated, the pipeline raises an error.
+
+::: {.notes}
+This slide shows that the pipeline is auditable. It does not silently pass bad data to the model.
+:::
+
+## 15. Step 10 — final modeling setup
+
+Temporal split:
+
+```text
+train      = older loans
+validation = later loans
+test       = newest loans
+```
+
+Used for:
+
+```text
+validation → model and threshold choice
+test       → final evaluation only
+```
+
+Model pipeline:
+
+```text
+numeric preprocessing
+categorical one-hot encoding
+classifier
+```
+
+::: {.notes}
+Explain why we avoid a random split: loan risk can change over time. Also mention that threshold tuning happens on validation, not test, to avoid evaluation leakage.
+:::
+
+## 16. Final summary
+
+The final preprocessing pipeline produces:
+
+```text
+loan-level classification data
+leakage-safe features
+explicit missing-value handling
+fewer redundant columns
+temporal validation design
+model-ready X, y, metadata
+```
+
+Main principle:
+
+> Only use information that would have been available at the loan decision time.
+
+::: {.notes}
+Close by saying that the preprocessing is designed to be explainable, not just to make the model run. The key improvements are leakage safety, meaningful features, explicit missing values, and clean temporal evaluation.
+:::
