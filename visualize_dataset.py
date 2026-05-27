@@ -398,8 +398,7 @@ for at in autotexts:
     at.set_color(C["text"] if DARK else "black")
 ax2.legend(
     handles=[
-        mpatches.Patch(color=c, label=label_text)
-        for c, label_text in zip(wedge_colors, ["A — Good (0)", "B — Bad (1)"])
+        mpatches.Patch(color=c, label=label_text) for c, label_text in zip(wedge_colors, ["A — Good (0)", "B — Bad (1)"])
     ],
     loc="lower center",
     fontsize=9,
