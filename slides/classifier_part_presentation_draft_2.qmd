@@ -1,0 +1,276 @@
+---
+title: "Financial Loan Default Classification"
+subtitle: "Evaluating the Impact of Data Volume vs. Label Noise"
+author: "Data Science Team"
+date: "Today"
+jupyter: python3
+format:
+  revealjs:
+    theme: simple
+    slide-number: true
+    progress: true
+    width: 1280
+    height: 720
+    margin: 0.08
+    smaller: false
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+# Classifiers & Methodology
+
+## Software & Tools {.smaller}
+
+Our classification pipeline is built entirely in **Python**, utilizing the following core libraries:
+
+- **`scikit-learn`**: The backbone of our modeling. We utilized `Pipeline` to chain preprocessing and modeling, and `ColumnTransformer` to dynamically route categorical, continuous, and binary features.
+- **Preprocessing**:
+  - `StandardScaler` for continuous numerical variables.
+  - `TargetEncoder` (with `smooth=10.0`) to handle high-cardinality categorical strings.
+- **Hyperparameter Tuning**: `GridSearchCV` paired with `RepeatedStratifiedKFold` (5 splits, 3 repeats) to ensure robust cross-validation on our imbalanced dataset.
+- **Data Handling**: `pandas` and `numpy` for routing and feature extraction.
+
+::: {.notes}
+Briefly on our tech stack: we kept things standard and robust. By strictly using scikit-learn pipelines, we ensured there was absolutely no data leakage between our training and test sets during cross-validation, especially important when applying target encoding to strings.
+:::
+
+## The Data Pipeline {.smaller}
+
+To ensure reproducibility, our workflow uses the exact data pipeline established in our codebase.
+
+```{python}
+#| echo: true
+#| eval: false
+import sys
+from pathlib import Path
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+
+# Path configuration to avoid conflicts
+PROJECT_ROOT = Path.cwd().resolve()
+while PROJECT_ROOT != PROJECT_ROOT.parent and not (PROJECT_ROOT / "pyproject.toml").exists():
+    PROJECT_ROOT = PROJECT_ROOT.parent
+
+DATA_DIR = PROJECT_ROOT / "data" / "raw"
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+# Example import from our custom preprocessing module
+from src.preprocessing.czech_financial_preprocessing_pipeline import (
+    CzechFinancialConfig,
+    build_classification_dataset,
+    load_and_normalize_tables
+)
+```
+
+::: {.notes}
+We prioritize reproducibility. The results you see today aren't from one-off Jupyter notebook cells; they are generated using our centralized preprocessing modules. Anyone on the team can pull the repo and reproduce these exact datasets.
+:::
+
+## What are our targets?
+
+- `A` = `FINISHED_PAID`
+- `B` = `FINISHED_IN_DEBT`
+- `C` = `ONGOING_PAID`
+- `D` = `ONGOING_IN_DEBT`
+
+::: {.notes}
+Let's quickly align on the target variable. A and B represent loans that have reached their end date—these are historical facts. C and D represent loans still in progress. Their current status is known, but their final outcome is technically unwritten.
+:::
+
+## How to define target classes?
+
+| Approach | GIVE LOAN (Positive) | DONT GIVE LOAN (Negative) | Sample Size |
+|---|---|---|---|
+| **1. Finished Only** | `FINISHED_PAID` | `FINISHED_IN_DEBT` | 234 rows  |
+| **2. All Loans** | `FINISHED_PAID` <br> `ONGOING_PAID` | `FINISHED_IN_DEBT` <br> `ONGOING_IN_DEBT` | 682 rows  |
+
+::: {.fragment}
+**The Problem:**
+`ONGOING_PAID` and `ONGOING_IN_DEBT` are still running loans. They introduce **label noise** because an `ONGOING_PAID` loan can eventually default, and an `ONGOING_IN_DEBT` loan can recover.
+:::
+
+::: {.notes}
+Here is the core experiment. Option 1 gives us absolute certainty but leaves us with a tiny sample of 234 rows. Option 2 nearly triples our data to 682 rows, but introduces label noise because ongoing loans can flip their status before they finish. We trained models on both to see which trade-off yields better real-world performance.
+:::
+
+## The Classifiers Trained {.smaller}
+
+We evaluated three linear models to establish a baseline of interpretable performance.
+
+::: {.incremental}
+1. **L1 Logistic Regression**: Uses a Lasso penalty.
+   - *Math*: $\min_{w, c} ||w||_1 + C \sum \log(\exp(-y_i (X_i^T w + c)) + 1)$
+   - *Function*: Acts as a strict feature selector, shrinking less important coefficients to zero.
+   - *Tuning*: Best `C` was 0.09 for Finished, and 0.2 for All Loans.
+2. **L1 Linear SVC**: A Support Vector Machine seeking the widest margin between classes.
+   - *Math*: $C \sum \max(0, 1 - y_i (w^T x_i + b)) + ||w||_1$
+   - *Function*: Also acts as an aggressive feature selector via the L1 penalty.
+   - *Tuning*: Best `C` was 0.04 for Finished, and 0.05 for All Loans.
+3. **L2 Ridge Classifier**: Treats classification as a penalized regression.
+   - *Math*: $\min_{w} ||Xw - y||_2^2 + \alpha ||w||_2^2$
+   - *Function*: Shrinks weights but *never* zeroes them out. Keeps all features.
+   - *Tuning*: Best `alpha` was 300.0 across both datasets.
+:::
+
+::: {.notes}
+We specifically chose linear models for this phase because we need interpretability. Black-box trees are great, but we need to know *why* the model is making decisions. Notice the contrast here: Logistic Regression and SVC are using an L1 penalty, meaning they will throw away useless features. Ridge uses an L2 penalty, meaning it keeps everything. Keep that in mind, it becomes very important later.
+:::
+
+## Performance Comparison: CV vs. Test {.smaller}
+
+```{python}
+#| fig-align: center
+#| fig-width: 11
+#| fig-height: 5
+import matplotlib.pyplot as plt
+import numpy as np
+
+labels = ['L1 Logistic', 'L1 Linear SVC', 'L2 Ridge']
+# Finished Data Accuracies
+finished_cv = [76.55, 77.48, 77.26]
+finished_test = [96.43, 78.57, 60.71]
+
+# All Data Accuracies
+all_cv = [82.34, 82.98, 82.06]
+all_test = [91.67, 92.03, 74.28]
+
+x = np.arange(len(labels))
+width = 0.2
+
+fig, ax = plt.subplots(figsize=(11, 5))
+rects1 = ax.bar(x - 1.5*width, finished_cv, width, label='Finished CV (234 samples)', color='#a9cce3')
+rects2 = ax.bar(x - 0.5*width, finished_test, width, label='Finished Test', color='#2980b9')
+rects3 = ax.bar(x + 0.5*width, all_cv, width, label='All CV (682 samples)', color='#a9dfbf')
+rects4 = ax.bar(x + 1.5*width, all_test, width, label='All Test', color='#27ae60')
+
+ax.set_ylabel('Balanced Accuracy (%)')
+ax.set_title('Cross-Validation vs Test Performance')
+ax.set_xticks(x)
+ax.set_xticklabels(labels)
+ax.set_ylim(50, 100)
+ax.legend(loc='upper right', bbox_to_anchor=(1.25, 1))
+ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+plt.tight_layout()
+plt.show()
+```
+
+::: {.fragment}
+Even with the label noise introduced by ongoing loans, providing the models with more data yielded significantly better cross-validation scores. Linear SVC peaked at 92.03% on the larger test set. Ridge struggled on the small dataset (60.71%) but improved to 74.28% with more data.
+:::
+
+::: {.notes}
+Looking at the chart, the light blue and light green bars are our cross-validation scores. Across all three models, CV performance jumped from around 77% to 82% simply by adding the noisy "ongoing" data. The Logistic and SVC models showed strong test performance on the expanded dataset as well. Ridge, however, really struggled, especially on the small dataset.
+:::
+
+# Interpretability: Opening the "Brain"
+
+::: {.notes}
+Now for the most interesting part. Because we used linear models, we can crack them open and look at the exact coefficients. We can see how "adding more data" fundamentally re-wired how the models evaluate risk.
+:::
+
+## Feature Selection Dynamics
+
+Because we used L1 regularization for Logistic Regression and Linear SVC, we can directly observe how the model's "brain" evolved when we fed it more data.
+
+* **Model 1 (Finished Only - 234 rows):** The models were starved for data and suffered from high variance. They panicked and clung to the most immediate, short-term signals available. L1 Logistic used only 9 out of 90 features.
+* **Model 2 (All Loans - 682 rows):** The injection of data stabilized the models. They expanded their view, relying on long-term macro-indicators rather than 30-day micro-fluctuations. L1 Logistic expanded to use 33 out of 91 features.
+
+::: {.notes}
+When the models only had 234 rows, they essentially developed tunnel vision. The L1 penalty aggressively pruned features until only 9 were left, all of them short-term metrics. But when we tripled the data, the model gained confidence. It started utilizing 33 features, taking a much more holistic view of the client's financial history.
+:::
+
+## The "Brain" of L1 Logistic Regression
+
+**How the top drivers shifted:**
+
+- **Finished Loans:** The top positive driver was strictly short-term: `cont__tx_1_30d_credit_tx_rate` (Coefficient: 0.452). It virtually ignored the actual size of the loan.
+- **All Loans:** With more data, the model distributed its logic. The top driver shifted to the macroscopic `cont__hist_negative_balance_rate` (0.975), and the absolute size of the loan, `cont__loan_amount` (0.473), became the second most important factor. The model learned that long-term history and total debt size matter more than last month's transactions.
+
+::: {.notes}
+This slide perfectly captures the shift. On the tiny dataset, the model just looked at whether money came in during the last 30 days. It missed the forest for the trees. On the larger dataset, it realized that historical negative balance rates and the absolute size of the loan are far superior predictors of long-term success. More data allowed it to learn macro-economics instead of just 30-day accounting.
+:::
+
+## Visualizing Top Drivers (L1 Logistic)
+
+```{python}
+#| fig-align: center
+#| fig-width: 12
+#| fig-height: 6
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Feature importances based on Logistic Regression (All Loans)
+features = [
+    "Hist. Negative Bal. Rate", "Loan Amount", "30d Credit Tx Rate",
+    "31-90d Credit Amt Sum", "31-90d Credit Tx Rate",
+    "91-180d Net Cashflow", "30d Bal. Min", "31-90d Bal. Min", "30d Bank Transfer Rate"
+]
+coefs = [0.975, 0.473, 0.461, 0.434, 0.398, 0.289, -0.507, -1.011, -1.079]
+
+df_plot = pd.DataFrame({'Feature': features, 'Coefficient': coefs})
+df_plot = df_plot.sort_values(by='Coefficient', ascending=True)
+
+plt.figure(figsize=(10, 6))
+colors = ['#e74c3c' if c < 0 else '#2ecc71' for c in df_plot['Coefficient']]
+sns.barplot(x='Coefficient', y='Feature', data=df_plot, palette=colors)
+plt.title('Top Predictive Drivers: L1 Logistic Regression (All Loans)')
+plt.xlabel('Coefficient Magnitude (Positive = Pays Loan, Negative = Defaults)')
+plt.ylabel('')
+plt.axvline(0, color='black', linewidth=1.5)
+plt.tight_layout()
+plt.show()
+```
+
+::: {.notes}
+Here we can visually see the top weights for the Logistic model trained on all loans. Green bars indicate factors that predict a loan will be paid off. Red bars indicate factors that strongly pull the prediction toward default. Notice how heavily the model weights those negative factors.
+:::
+
+## Decoding the Red Flags (Negative Drivers) {.smaller}
+
+What specifically predicts that a loan will end up `IN_DEBT`? By looking at the massive negative coefficients in the "All Loans" dataset, we see a clear pattern of financial distress.
+
+- **`cont__tx_1_30d_bank_transfer_rate` (-1.079):** The single strongest predictor of default. A sudden spike in outgoing bank transfers immediately before loan approval suggests the client is rapidly moving liquidity out of their account, potentially indicating hidden obligations or capital flight.
+- **`cont__tx_31_90d_balance_min` (-1.011) & `cont__tx_1_30d_balance_min` (-0.507):** Dangerously low minimum balances in the 1 to 3 months prior to the loan are massive red flags. It proves the client was already scraping the bottom of their account before taking on new debt.
+
+::: {.notes}
+When we translate the red bars back into business context, they make perfect intuitive sense. If a client is suddenly making a massive amount of outward bank transfers right before asking for a loan, or if they have been scraping absolute zero in their accounts for the last 90 days, they are extremely high risk. The model naturally discovered these "capital flight" and "bottom scraping" behaviors.
+:::
+
+## The Support Vector "Brain" (Linear SVC)
+
+Did the Linear SVC agree with Logistic Regression? **Yes, almost perfectly.**
+
+- **Finished Only (Used 14 of 90 features):** Like Logistic Regression, the SVC over-indexed on the short-term `tx_1_30d_credit_tx_rate` (0.161) and flagged `tx_1_30d_bank_transfer_rate` (-0.269) as its primary red flag.
+- **All Loans (Used 33 of 91 features):** Given the larger dataset, it evolved identically to the Logistic model. The #1 positive predictor shifted to `cont__hist_negative_balance_rate` (0.326), and `cont__loan_amount` more than doubled in importance (0.163). Its biggest red flags were again the 30-to-90-day minimum balances and bank transfer rates.
+
+::: {.notes}
+To validate these findings, we checked the Linear Support Vector Classifier. It practically mirrored the Logistic Regression model. It exhibited the exact same tunnel-vision on the small dataset, and the exact same macro-awareness on the large dataset. This consistency gives us high confidence that these are genuine underlying patterns in the data, not just artifacts of one specific algorithm.
+:::
+
+## The Ridge Classifier Conundrum
+
+**Why did Ridge struggle?**
+Unlike L1, an L2 penalty (Ridge) **never zeroes out features**. It kept all features in both scenarios.
+
+- **Finished Loans:** Having 90 non-zero features on only 189 training samples is a mathematical recipe for extreme noise. Ridge couldn't separate the signal, resulting in a poor 60.71% test accuracy.
+- **All Loans:** By tripling the training data, Ridge finally had enough statistical support to weigh all 91 features properly, improving massively to 74.28% balanced accuracy. However, because it couldn't drop redundant temporal features (like having a 30d, 90d, and 180d version of the same metric), its interpretability remains a messy, diluted spread of tiny coefficients.
+
+::: {.notes}
+This explains why the Ridge classifier performed so poorly earlier. Our dataset has 90 features, many of them highly correlated time-windows (like 30-day, 60-day, and 90-day minimum balances). L1 models threw the redundant ones away. Ridge tried to keep them all. On the small dataset, 90 features for 189 training rows led to severe overfitting and noise. It improved with more data, but its lack of feature selection remains a handicap here.
+:::
+
+## Conclusion: The Ultimate Takeaway
+
+1. **More Data > Perfect Labels:** In this specific dataset, adding the noisy `ONGOING` loans provided a massive net benefit. Tripling the dataset size allowed the models to escape short-term variance.
+2. **Short-term vs. Long-term:** Small datasets forced models to overfit on 30-day transaction trends. Large datasets allowed models to learn true risk factors: macroscopic historical behavior, total loan amounts, and deeply concerning drops in recent minimum balances.
+3. **Feature Selection is Key:** L1 models (Logistic Regression, Linear SVC) vastly outperformed the L2 model (Ridge) because they could aggressively prune redundant features, isolating the pure financial signals from the noise.
+
+::: {.notes}
+To summarize: embracing a little bit of label noise in exchange for triple the data volume was absolutely the right call. It allowed our L1 models to break free from short-term noise and identify the true, long-term indicators of financial distress. Moving forward, we recommend utilizing the larger dataset with L1-regularized models to handle this specific problem. Thank you.
+:::
