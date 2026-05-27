@@ -1,0 +1,22 @@
+Czech Financial Dataset — Summary Statistics
+======================================================================
+Metric                         Value                  Notes
+======================================================================
+Accounts                       4,500                  Unique bank accounts
+Clients                        5,369                  Unique clients
+Loans                          682                    Loan contracts (682 total)
+→ Finished A (Good)            203                      29.8% of all loans
+→ Finished B (Bad)             31                       4.5% of all loans
+→ Running C (Good)             403                      Active / no problems
+→ Running D (Bad)              45                       Active / problems
+Transactions                   1,056,320              Individual bank transactions
+Orders                         6,471                  Standing payment orders
+Cards                          892                    Issued credit/debit cards
+Districts                      77                     Unique geographic districts
+Loan amount mean               CZK 151,410            Std: CZK 113,372
+Loan amount range              CZK 4,980 – 590,820    
+Loan duration                  [12, 24, 36, 48, 60]   months (6 levels)
+Owner age (median)             39.7 years             at time of loan
+Gender split (owners)          M 49% / F 51%          finished loans subset
+Time span                      Jan 1993 – Dec 1998    approx (from transaction dates)
+======================================================================
