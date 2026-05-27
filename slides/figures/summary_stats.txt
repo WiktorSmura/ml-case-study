@@ -14,7 +14,7 @@ Orders                         6,471                  Standing payment orders
 Cards                          892                    Issued credit/debit cards
 Districts                      77                     Unique geographic districts
 Loan amount mean               CZK 151,410            Std: CZK 113,372
-Loan amount range              CZK 4,980 – 590,820    
+Loan amount range              CZK 4,980 – 590,820
 Loan duration                  [12, 24, 36, 48, 60]   months (6 levels)
 Owner age (median)             39.7 years             at time of loan
 Gender split (owners)          M 49% / F 51%          finished loans subset

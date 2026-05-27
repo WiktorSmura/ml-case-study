@@ -177,4 +177,3 @@ When predicting default, we can only use information the bank knew *at the time 
 ::: {.notes}
 This slide perfectly bridges your section into Part 2. Instead of a complex graph, it just states the problem: we have a lot of data, we need to flatten it, and we have to be extremely careful not to use future information.
 :::
-
