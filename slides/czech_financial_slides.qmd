@@ -19,11 +19,178 @@ execute:
   message: false
 ---
 
+## Software & Tools {.smaller}
+
+Our classification pipeline is built entirely in **Python**, utilizing the following core libraries:
+
+- **`scikit-learn`**: The backbone of our modeling
+- **Data Handling**: `pandas` and `numpy` for routing and feature extraction.
+- **Preprocessing**:
+  - `StandardScaler` for continuous numerical variables.
+  - `TargetEncoder` (with `smooth=10.0`) to handle high-cardinality categorical strings.
+- **Hyperparameter Tuning**: `GridSearchCV` paired with `RepeatedStratifiedKFold` (5 splits, 3 repeats) to ensure robust cross-validation on our imbalanced dataset.
+
+::: {.notes}
+Briefly on our tech stack: we kept things standard and robust. By strictly using scikit-learn pipelines, we ensured there was absolutely no data leakage between our training and test sets during cross-validation, especially important when applying target encoding to strings.
+:::
+
 # Data Overview
 
-## TODO
+## Where does this dataset come from?
 
-TODO
+::: {.columns}
+::: {.column width="50%"}
+**Czech Financial Dataset (Berka, PKDD'99)**
+
+- Real Czech bank data, 1993–1998
+- Published for PKDD '99 challenge
+- Relational structure (not a flat CSV)
+
+**The core business problem:**
+Predict which loan applicants will default — using only the information available *at the time the loan is approved*.
+:::
+
+::: {.column width="50%"}
+**Table sizes**
+
+![](figures/01_table_sizes.png)
+:::
+:::
+
+::: {.notes}
+Start by grounding the audience. This is not a toy dataset — it is messy, relational, real-world banking data from the 1990s. The challenge is not just the modelling, it is the entire pipeline from raw tables to a model-ready matrix.
+:::
+
+## Eight tables, one question
+
+![](figures/02_er_diagram.png)
+
+::: {.notes}
+This diagram shows why pre-processing is the hardest part. The data is fragmented across 8 tables. Every feature we want to feed the classifier has to be assembled by joining tables and aggregating. The loan table has only 682 rows — that is our model's training set.
+:::
+
+## A peek at the raw data {.smaller}
+
+What do these tables actually look like before we process them?
+
+**The `loan` table** (Target and contract terms)
+
+| loan_id | account_id | date | amount | duration | payments | status |
+|:---|:---|:---|:---|:---|:---|:---|
+| *Numeric* | *Numeric* | *Date (YYMMDD)* | *Numeric* | *Numeric* | *Numeric* | *Categorical* |
+| 5314 | 1 | 930105 | 96396 | 12 | 8033 | B |
+| 5316 | 2 | 930226 | 165960 | 36 | 4610 | A |
+
+<br>
+
+**The `trans` table** (Financial behaviour)
+
+| trans_id | account_id | date | type | amount | balance | ... |
+|:---|:---|:---|:---|:---|:---|:---|
+| *Numeric* | *Numeric* | *Date* | *Categorical* | *Numeric* | *Numeric* | ... |
+| 695247 | 1 | 930101 | PRIJEM | 1000 | 1000 | ... |
+| 171812 | 2 | 930101 | PRIJEM | 1100 | 1100 | ... |
+
+::: {.notes}
+We need to give an example of the actual data to show attribute types and meanings. The transaction table has over a million rows like this, with cryptic Czech categories (PRIJEM = credit). We have to translate and aggregate these.
+:::
+
+## What are we predicting?
+
+::: {.columns}
+::: {.column width="50%"}
+The **loan table** contains a `status` column:
+
+| Status | Meaning | Target |
+|---|---|:---:|
+| **A** | Finished · no problems | ✅ **0** |
+| **B** | Finished · with problems | ✅ **1** |
+| C | Running · no problems | ❌ |
+| D | Running · problems | ❌ |
+
+**Why only A and B?**
+C and D have not concluded yet. The cleanest experiment uses only **finished contracts**.
+:::
+
+::: {.column width="50%"}
+![](figures/03_loan_status.png)
+:::
+:::
+
+::: {.notes}
+This is the most important slide conceptually. The business question is well-defined but the dataset is imbalanced — only 31 loans are class 1 (bad). This immediately tells the classifier designer they cannot use raw accuracy as a metric.
+:::
+
+## Loan characteristics
+
+![](figures/04_loan_distributions.png)
+
+Distributions overlap significantly. Loan amount and duration alone cannot separate good from bad. We need richer signals from **transactions** and **demographics**.
+
+::: {.notes}
+This is the key motivating slide for feature engineering. If the loan contract terms alone could perfectly separate good from bad, we wouldn't need transactions or demographics. The overlap here is the argument for why a rich feature matrix matters.
+:::
+
+## Client demographics
+
+![](figures/05_client_demographics.png)
+
+- Age ranges broadly (20–70); median is similar for good/bad loans.
+- Gender split is roughly 50/50 for both outcomes.
+- We keep demographics as baseline features, but rely more on behaviour.
+
+::: {.notes}
+Demographics set the context — they describe who the client is. But they're not sufficient on their own. The critical insight is that demographic features interact with behavioural features (transactions).
+:::
+
+## Transaction patterns
+
+![](figures/06_transactions.png)
+
+- 1M+ rows aggregated into per-loan **summary statistics**.
+- Accounts accumulate **months or years** of history before the loan.
+- Cash-flow and spending behaviour are highly predictive.
+
+::: {.notes}
+Transactions are the most data-rich part of the dataset. 1M rows condensed into a handful of summary statistics per loan. Mention that how we aggregate is one of the main feature engineering decisions in Part 2.
+:::
+
+## Geographic context
+
+![](figures/07_district.png)
+
+A loan in an urban, high-salary region (like Prague) carries different background risk than a loan in a high-unemployment rural district. We use these as **macroeconomic features**.
+
+::: {.notes}
+Geography is a proxy for economic context that the bank cannot control. A client in a struggling district may face job loss and default even if they were a responsible borrower. These features give the classifier macroeconomic context.
+:::
+
+## Feature Correlations
+
+![](figures/09_correlation.png)
+
+When we temporarily join the numerical columns together, we see:
+- **Loan Amount** and **Payments** are highly correlated (as expected).
+- **Crime Rate** and **Salary** are positively correlated (urban effect).
+- **Client Age** has almost zero linear correlation with loan terms.
+
+::: {.notes}
+This heatmap confirms our hypothesis: the tables capture distinct dimensions of a client's profile. We need all these dimensions to train an effective classifier.
+:::
+
+## The Preprocessing Challenge
+
+Transforming these 8 relational tables into a predictive model requires solving two major hurdles:
+
+**1. Data Aggregation**
+How do we condense 1,000,000+ individual transactions and daily balances into a single row of features for one loan?
+
+**2. Strict Temporal Cutoffs (Data Leakage)**
+When predicting default, we can only use information the bank knew *at the time the loan was signed*. Any transactions or card issuances that happened after the `loan_date` must be strictly filtered out to prevent "cheating."
+
+::: {.notes}
+This slide perfectly bridges your section into Part 2. Instead of a complex graph, it just states the problem: we have a lot of data, we need to flatten it, and we have to be extremely careful not to use future information.
+:::
 
 # Data Preprocessing
 
@@ -391,55 +558,6 @@ Close by saying that the preprocessing is designed to be explainable, not just t
 
 # Classifiers
 
-## Software & Tools {.smaller}
-
-Our classification pipeline is built entirely in **Python**, utilizing the following core libraries:
-
-- **`scikit-learn`**: The backbone of our modeling. We utilized `Pipeline` to chain preprocessing and modeling, and `ColumnTransformer` to dynamically route categorical, continuous, and binary features.
-- **Preprocessing**:
-  - `StandardScaler` for continuous numerical variables.
-  - `TargetEncoder` (with `smooth=10.0`) to handle high-cardinality categorical strings.
-- **Hyperparameter Tuning**: `GridSearchCV` paired with `RepeatedStratifiedKFold` (5 splits, 3 repeats) to ensure robust cross-validation on our imbalanced dataset.
-- **Data Handling**: `pandas` and `numpy` for routing and feature extraction.
-
-::: {.notes}
-Briefly on our tech stack: we kept things standard and robust. By strictly using scikit-learn pipelines, we ensured there was absolutely no data leakage between our training and test sets during cross-validation, especially important when applying target encoding to strings.
-:::
-
-## The Data Pipeline {.smaller}
-
-To ensure reproducibility, our workflow uses the exact data pipeline established in our codebase.
-
-```{python}
-#| echo: true
-#| eval: false
-import sys
-from pathlib import Path
-from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
-
-# Path configuration to avoid conflicts
-PROJECT_ROOT = Path.cwd().resolve()
-while PROJECT_ROOT != PROJECT_ROOT.parent and not (PROJECT_ROOT / "pyproject.toml").exists():
-    PROJECT_ROOT = PROJECT_ROOT.parent
-
-DATA_DIR = PROJECT_ROOT / "data" / "raw"
-
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-# Example import from our custom preprocessing module
-from src.preprocessing.czech_financial_preprocessing_pipeline import (
-    CzechFinancialConfig,
-    build_classification_dataset,
-    load_and_normalize_tables
-)
-```
-
-::: {.notes}
-We prioritize reproducibility. The results you see today aren't from one-off Jupyter notebook cells; they are generated using our centralized preprocessing modules. Anyone on the team can pull the repo and reproduce these exact datasets.
-:::
-
 ## What are our targets?
 
 - `A` = `FINISHED_PAID`
@@ -535,21 +653,8 @@ Even with the label noise introduced by ongoing loans, providing the models with
 
 ::: {.notes}
 Looking at the chart, the light blue and light green bars are our cross-validation scores. Across all three models, CV performance jumped from around 77% to 82% simply by adding the noisy "ongoing" data. The Logistic and SVC models showed strong test performance on the expanded dataset as well. Ridge, however, really struggled, especially on the small dataset.
-:::
 
-::: {.notes}
 Now for the most interesting part. Because we used linear models, we can crack them open and look at the exact coefficients. We can see how "adding more data" fundamentally re-wired how the models evaluate risk.
-:::
-
-## Feature Selection Dynamics
-
-Because we used L1 regularization for Logistic Regression and Linear SVC, we can directly observe how the model's "brain" evolved when we fed it more data.
-
-* **Model 1 (Finished Only - 234 rows):** The models were starved for data and suffered from high variance. They panicked and clung to the most immediate, short-term signals available. L1 Logistic used only 9 out of 90 features.
-* **Model 2 (All Loans - 682 rows):** The injection of data stabilized the models. They expanded their view, relying on long-term macro-indicators rather than 30-day micro-fluctuations. L1 Logistic expanded to use 33 out of 91 features.
-
-::: {.notes}
-When the models only had 234 rows, they essentially developed tunnel vision. The L1 penalty aggressively pruned features until only 9 were left, all of them short-term metrics. But when we tripled the data, the model gained confidence. It started utilizing 33 features, taking a much more holistic view of the client's financial history.
 :::
 
 ## The "Brain" of L1 Logistic Regression
@@ -566,45 +671,365 @@ This slide perfectly captures the shift. On the tiny dataset, the model just loo
 ## Visualizing Top Drivers (L1 Logistic)
 
 ```{python}
-#| fig-align: center
-#| fig-width: 12
-#| fig-height: 6
 import pandas as pd
-import seaborn as sns
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 
-# Feature importances based on Logistic Regression (All Loans)
-features = [
-    "Hist. Negative Bal. Rate", "Loan Amount", "30d Credit Tx Rate",
-    "31-90d Credit Amt Sum", "31-90d Credit Tx Rate",
-    "91-180d Net Cashflow", "30d Bal. Min", "31-90d Bal. Min", "30d Bank Transfer Rate"
+
+def animate_coefficient_transition(data_1, data_2, name_1, name_2, title, height=600):
+    features_1, coefs_1 = data_1
+    features_2, coefs_2 = data_2
+
+    # 1. Unified Data Setup
+    all_features = list(set(features_1 + features_2))
+    df = pd.DataFrame({'Feature': all_features})
+
+    df['Coef_1'] = df['Feature'].map(dict(zip(features_1, coefs_1))).fillna(0)
+    df['Coef_2'] = df['Feature'].map(dict(zip(features_2, coefs_2))).fillna(0)
+
+    # 2. Determine sorted order for animations
+    order_1 = df.sort_values(by='Coef_1', ascending=True)['Feature'].tolist()
+    order_2 = df.sort_values(by='Coef_2', ascending=True)['Feature'].tolist()
+
+    # 3. Custom Coloring Logic
+    def get_custom_colors(target_coef_col):
+        colors = []
+        for _, row in df.iterrows():
+            feat = row['Feature']
+            coef = row[target_coef_col]
+
+            if feat in features_1 and feat not in features_2:
+                colors.append('#9b59b6')  # Purple (Dropped)
+            elif feat in features_2 and feat not in features_1:
+                colors.append('#3498db')  # Blue (New)
+            else:
+                colors.append('#e74c3c' if coef < 0 else '#2ecc71') # Red/Green
+        return colors
+
+    colors_frame_1 = get_custom_colors('Coef_1')
+    colors_frame_2 = get_custom_colors('Coef_2')
+
+    # Ghost formatting
+    ghost_color = 'rgba(200, 200, 200, 0.4)'
+    ghost_line = dict(color='rgba(150, 150, 150, 0.8)', width=1)
+
+    # Custom hover template
+    hover_tmpl = "<b>%{y}</b><br>Coefficient: %{x:.4f}<extra></extra>"
+
+    # Calculate dynamic height (give each feature about 25 pixels, minimum 600px total)
+    dynamic_height = max(600, len(all_features) * 25)
+
+    # 4. Build the Figure
+    fig = go.Figure(
+        data=[
+            # TRACE 0: Ghost Bar
+            go.Bar(
+                x=[0] * len(df),
+                y=df['Feature'],
+                orientation='h',
+                width=0.8,
+                marker=dict(color=ghost_color, line=ghost_line),
+                name='Previous Model Value',
+                hoverinfo='skip'
+            ),
+            # TRACE 1: Main Bar
+            go.Bar(
+                x=df['Coef_1'],
+                y=df['Feature'],
+                orientation='h',
+                width=0.5,
+                marker_color=colors_frame_1,
+                name='Current Model Value',
+                hovertemplate=hover_tmpl
+            )
+        ],
+        layout=go.Layout(
+            height=height,
+            barmode='overlay',
+            title=title,
+            xaxis=dict(title='Coefficient Magnitude',
+                       range=[df[['Coef_1', 'Coef_2']].values.min() - 0.1,
+                              df[['Coef_1', 'Coef_2']].values.max() + 0.1]),
+            yaxis=dict(
+                title='',
+                automargin=True,
+                showticklabels=True, # Labels are back
+                dtick=1,             # CRITICAL: Forces Plotly to show a label for EVERY row
+                tickfont=dict(size=11), # Slightly smaller font to keep it clean
+                categoryorder='array',
+                categoryarray=order_1
+            ),
+            shapes=[dict(type='line', yref='paper', y0=0, y1=1, xref='x', x0=0, x1=0,
+                         line=dict(color="black", width=2))],
+            template="plotly_white",
+            showlegend=False,
+            updatemenus=[dict(
+                type="buttons",
+                direction="right",
+                x=0.5, y=1.1, # Shifted slightly so it doesn't overlap titles on taller graphs
+                xanchor='center',
+                buttons=[
+                    dict(label=name_1,
+                         method="animate",
+                         args=[["frame1"], {"frame": {"duration": 1000, "redraw": False},
+                                            "transition": {"duration": 1000}}]),
+                    dict(label=name_2,
+                         method="animate",
+                         args=[["frame2"], {"frame": {"duration": 1000, "redraw": False},
+                                            "transition": {"duration": 1000}}])
+                ]
+            )]
+        ),
+        frames=[
+            go.Frame(
+                name="frame1",
+                data=[
+                    go.Bar(x=[0] * len(df)),
+                    go.Bar(x=df['Coef_1'], marker_color=colors_frame_1)
+                ],
+                layout=go.Layout(yaxis=dict(categoryarray=order_1))
+            ),
+            go.Frame(
+                name="frame2",
+                data=[
+                    go.Bar(x=df['Coef_1']),
+                    go.Bar(x=df['Coef_2'], marker_color=colors_frame_2)
+                ],
+                layout=go.Layout(yaxis=dict(categoryarray=order_2))
+            )
+        ]
+    )
+
+    # Custom legend
+    fig.add_annotation(x=1, y=1.05, xref="paper", yref="paper", showarrow=False,
+                       text=f"<span style='color:#9b59b6'>■ Dropped in {name_2}</span> | <span style='color:#3498db'>■ New in {name_2}</span>",
+                       font=dict(size=12))
+
+    fig.show()
+
+features_finished_logistic = [
+    "cont__tx_1_30d_credit_tx_rate",
+    "cont__hist_negative_balance_rate",
+    "cont__loan_amount",
+    "cont__tx_91_180d_balance_min",
+    "cont__tx_181_365d_net_cashflow_sum",
+    "cont__tx_1_30d_balance_min",
+    "cont__hist_history_span_days",
+    "cont__tx_31_90d_balance_min",
+    "cont__tx_1_30d_bank_transfer_rate"
 ]
-coefs = [0.975, 0.473, 0.461, 0.434, 0.398, 0.289, -0.507, -1.011, -1.079]
 
-df_plot = pd.DataFrame({'Feature': features, 'Coefficient': coefs})
-df_plot = df_plot.sort_values(by='Coefficient', ascending=True)
+coefs_finished_logistic = [
+    0.4524468588164459736944423,
+    0.2630989441087092095550304,
+    0.0675226463681707772535034,
+    -0.0853510797792316061594065,
+    -0.1242807850174331291137619,
+    -0.1699601475105275705246299,
+    -0.2626476982043833285906942,
+    -0.3449924508637731146443173,
+    -0.5345645748708233169210757
+]
 
-plt.figure(figsize=(10, 6))
-colors = ['#e74c3c' if c < 0 else '#2ecc71' for c in df_plot['Coefficient']]
-sns.barplot(x='Coefficient', y='Feature', data=df_plot, palette=colors)
-plt.title('Top Predictive Drivers: L1 Logistic Regression (All Loans)')
-plt.xlabel('Coefficient Magnitude (Positive = Pays Loan, Negative = Defaults)')
-plt.ylabel('')
-plt.axvline(0, color='black', linewidth=1.5)
-plt.tight_layout()
-plt.show()
+data_finished_logistic = (features_finished_logistic, coefs_finished_logistic)
+
+features_all_logistic = [
+    "cont__hist_negative_balance_rate",
+    "cont__loan_amount",
+    "cont__tx_1_30d_credit_tx_rate",
+    "cont__tx_31_90d_credit_amount_sum",
+    "cont__tx_31_90d_credit_tx_rate",
+    "cont__tx_91_180d_credit_amount_sum",
+    "cont__tx_91_180d_negative_balance_rate",
+    "cont__tx_91_180d_net_cashflow_sum",
+    "cont__tx_181_365d_cash_deposit_rate",
+    "cont__hist_days_since_last_tx",
+    "cont__tx_1_30d_tx_count",
+    "cont__tx_91_180d_bank_transfer_rate",
+    "cont__tx_91_180d_active_days",
+    "cont__tx_1_30d_debit_amount_sum",
+    "cont__tx_91_180d_insurance_payment_amount_sum",
+    "cont__tx_181_365d_credit_amount_sum",
+    "cont__tx_1_30d_net_cashflow_sum",
+    "cont__account_district_average_salary",
+    "cont__hist_history_span_days",
+    "cont__tx_181_365d_balance_min",
+    "cont__tx_31_90d_cash_withdrawal_rate",
+    "cont__account_district_unemployment_rate96",
+    "cont__tx_91_180d_balance_min",
+    "cont__tx_181_365d_bank_transfer_rate",
+    "cont__tx_181_365d_net_cashflow_sum",
+    "cont__tx_181_365d_balance_mean",
+    "cont__hist_net_cashflow_sum",
+    "cont__hist_balance_min",
+    "cont__tx_31_90d_cash_deposit_rate",
+    "cont__tx_181_365d_household_payment_amount_sum",
+    "cont__tx_1_30d_balance_min",
+    "cont__tx_31_90d_balance_min",
+    "cont__tx_1_30d_bank_transfer_rate"
+]
+
+coefs_all_logistic = [
+    0.9751243353313613360100476,
+    0.4730124560658243715316473,
+    0.4610056631423453676887902,
+    0.4339816228070278447681574,
+    0.3981295470354862531259243,
+    0.3979174844789084564133930,
+    0.2952281587387248773524107,
+    0.2891156412600733305318101,
+    0.1445558618185893151597554,
+    0.1342907427147825294433403,
+    0.0976363136101626727381131,
+    0.0898102049403270014105161,
+    0.0537674729625997049886621,
+    0.0420047420237406043952433,
+    0.0142804457283935530564900,
+    -0.0056150040620526328258300,
+    -0.0186886356815950636922619,
+    -0.0278042510717864364833130,
+    -0.0336982233204601994147609,
+    -0.0562011112429299519721582,
+    -0.1410454107123295386383433,
+    -0.1533456906165355793092431,
+    -0.1611304123275407729209974,
+    -0.1696341028758537039511367,
+    -0.2224573941793448195181071,
+    -0.2381085157682205355467175,
+    -0.3327700619826511330145991,
+    -0.3377511611649126610501526,
+    -0.3671349286828369251622917,
+    -0.3690004337576047177549299,
+    -0.5072778421839692075678840,
+    -1.0110632568257709174019965,
+    -1.0790512753189147598931186
+]
+
+data_all_logistic = (features_all_logistic, coefs_all_logistic)
+
+
+features_finished_svc = [
+    "cont__tx_1_30d_credit_tx_rate",
+    "cont__hist_negative_balance_rate",
+    "cont__loan_amount",
+    "cont__hist_days_since_last_tx",
+    "cont__tx_91_180d_negative_balance_rate",
+    "cont__tx_91_180d_credit_amount_sum",
+    "cont__hist_net_cashflow_sum",
+    "cont__tx_181_365d_balance_min",
+    "bin__tx_181_365d_has_activity",
+    "cont__tx_1_30d_balance_min",
+    "cont__tx_181_365d_net_cashflow_sum",
+    "cont__tx_31_90d_balance_min",
+    "cont__hist_history_span_days",
+    "cont__tx_1_30d_bank_transfer_rate"
+]
+
+coefs_finished_svc = [
+    0.1612709057035216775322084,
+    0.1040850009759208966153565,
+    0.0744094777229308418364795,
+    0.0467097605794561110403862,
+    0.0252605152226897146372497,
+    0.0138473689539745439813778,
+    -0.0442615007002596719254406,
+    -0.0604644216241896625962937,
+    -0.0605783112852380234425453,
+    -0.0856866326984870030347707,
+    -0.1153492021706879339104646,
+    -0.1340947042510669262593836,
+    -0.1354599596693027152571887,
+    -0.2691671729831867088122976
+]
+
+data_finished_svc = (features_finished_svc, coefs_finished_svc)
+
+features_all_svc = [
+    "cont__hist_negative_balance_rate",
+    "cont__loan_amount",
+    "cont__tx_1_30d_credit_tx_rate",
+    "cont__tx_31_90d_credit_amount_sum",
+    "cont__tx_31_90d_credit_tx_rate",
+    "cont__tx_91_180d_credit_amount_sum",
+    "cont__tx_91_180d_negative_balance_rate",
+    "cont__tx_91_180d_net_cashflow_sum",
+    "cont__hist_days_since_last_tx",
+    "cont__tx_1_30d_tx_count",
+    "cont__tx_181_365d_cash_deposit_rate",
+    "cont__tx_91_180d_active_days",
+    "cont__tx_91_180d_bank_transfer_rate",
+    "cont__tx_1_30d_debit_amount_sum",
+    "cont__account_district_ratio_urban",
+    "cont__account_district_average_salary",
+    "cont__tx_1_30d_net_cashflow_sum",
+    "cont__hist_history_span_days",
+    "cont__tx_181_365d_balance_min",
+    "cont__tx_181_365d_bank_transfer_rate",
+    "cont__tx_91_180d_balance_min",
+    "cont__account_district_unemployment_rate96",
+    "cont__tx_31_90d_cash_withdrawal_rate",
+    "cont__tx_181_365d_net_cashflow_sum",
+    "cont__tx_181_365d_balance_mean",
+    "cont__tx_181_365d_household_payment_amount_sum",
+    "cont__hist_net_cashflow_sum",
+    "cont__hist_balance_min",
+    "cont__tx_31_90d_cash_deposit_rate",
+    "cont__tx_1_30d_balance_min",
+    "bin__tx_31_90d_has_activity",
+    "cont__tx_31_90d_balance_min",
+    "cont__tx_1_30d_bank_transfer_rate"
+]
+
+coefs_all_svc = [
+    0.3264401935498740248142724,
+    0.1633392771263885434596119,
+    0.1626531923055609951678235,
+    0.1453687824405762163415545,
+    0.1375131552576322191416835,
+    0.1345462665282310676939659,
+    0.1227806442618129267874139,
+    0.0943700615175622203878447,
+    0.0483450955351524061520685,
+    0.0419791703041099417692550,
+    0.0405208968610265493626166,
+    0.0254464809874465798522625,
+    0.0201063854287315615931853,
+    0.0012882947275175160063709,
+    -0.0033195714868341262906992,
+    -0.0132342227733822596219548,
+    -0.0195100177801130897359272,
+    -0.0249055220755942663402038,
+    -0.0284227667796637037400664,
+    -0.0414773716865396227526652,
+    -0.0423086079380250029702282,
+    -0.0535587054196369483083373,
+    -0.0572359107902270583534410,
+    -0.0754050133514595766204280,
+    -0.0770642326107929542811092,
+    -0.1111899077522215673052841,
+    -0.1174140816666412873159331,
+    -0.1185941960232893416238298,
+    -0.1399960712587301758791369,
+    -0.1662924583382170418133228,
+    -0.1718560865739847953737041,
+    -0.3399148921574551285296195,
+    -0.3678292222770317976276999
+]
+
+data_all_svc = (features_all_svc, coefs_all_svc)
+
+
 ```
+```{python}
+#| fig-align: center
 
-::: {.notes}
-Here we can visually see the top weights for the Logistic model trained on all loans. Green bars indicate factors that predict a loan will be paid off. Red bars indicate factors that strongly pull the prediction toward default. Notice how heavily the model weights those negative factors.
-:::
-
-## Decoding the Red Flags (Negative Drivers) {.smaller}
-
-What specifically predicts that a loan will end up `IN_DEBT`? By looking at the massive negative coefficients in the "All Loans" dataset, we see a clear pattern of financial distress.
-
-- **`cont__tx_1_30d_bank_transfer_rate` (-1.079):** The single strongest predictor of default. A sudden spike in outgoing bank transfers immediately before loan approval suggests the client is rapidly moving liquidity out of their account, potentially indicating hidden obligations or capital flight.
-- **`cont__tx_31_90d_balance_min` (-1.011) & `cont__tx_1_30d_balance_min` (-0.507):** Dangerously low minimum balances in the 1 to 3 months prior to the loan are massive red flags. It proves the client was already scraping the bottom of their account before taking on new debt.
+animate_coefficient_transition(
+      data_finished_logistic,
+      data_all_logistic,
+      name_1 = "FINISHED",
+      name_2 = "ALL",
+      title='Predictive Drivers: L1 Logistic Regression'
+)
+```
 
 ::: {.notes}
 When we translate the red bars back into business context, they make perfect intuitive sense. If a client is suddenly making a massive amount of outward bank transfers right before asking for a loan, or if they have been scraping absolute zero in their accounts for the last 90 days, they are extremely high risk. The model naturally discovered these "capital flight" and "bottom scraping" behaviors.
@@ -620,6 +1045,50 @@ Did the Linear SVC agree with Logistic Regression? **Yes, almost perfectly.**
 ::: {.notes}
 To validate these findings, we checked the Linear Support Vector Classifier. It practically mirrored the Logistic Regression model. It exhibited the exact same tunnel-vision on the small dataset, and the exact same macro-awareness on the large dataset. This consistency gives us high confidence that these are genuine underlying patterns in the data, not just artifacts of one specific algorithm.
 :::
+
+## Visualizing Top Drivers (L1 Linear SVC)
+
+```{python}
+#| fig-align: center
+
+animate_coefficient_transition(
+      data_finished_svc,
+      data_all_svc,
+      name_1 = "FINISHED",
+      name_2 = "ALL",
+      title='Predictive Drivers: L1 Linear SVC'
+)
+```
+
+
+
+## Visualizing Logistic Regression vs Linear SVC
+
+```{python}
+#| fig-align: center
+
+animate_coefficient_transition(
+      data_finished_logistic,
+      data_finished_svc,
+      name_1 = "Logistic",
+      name_2 = "SVC",
+      title='Predictive Drivers:L1 Logistic Regression vs L1 Linear SVC (Only Finished Loans)'
+)
+```
+
+## Visualizing Logistic Regression vs Linear SVC
+
+```{python}
+#| fig-align: center
+
+animate_coefficient_transition(
+      data_all_logistic,
+      data_all_svc,
+      name_1 = "Logistic",
+      name_2 = "SVC",
+      title='Predictive Drivers:L1 Logistic Regression vs L1 Linear SVC (All Loans)'
+)
+```
 
 ## The Ridge Classifier Conundrum
 
