@@ -1,7 +1,7 @@
 ---
 title: "Czech Financial Dataset"
 subtitle: ""
-author: ""
+author: "Jędrzej Kaczmarek, Wiktor Smura, Marcin Krzewiński"
 date: ""
 format:
   revealjs:
@@ -17,6 +17,10 @@ execute:
   echo: false
   warning: false
   message: false
+title-slide-attributes:
+  data-background-image: "krecik/bogaty_2_small.png"
+  data-background-size: "10%"
+  data-background-position: "bottom 20px right 20px"
 ---
 
 ## Software & Tools {.smaller}
@@ -95,7 +99,7 @@ What do these tables actually look like before we process them?
 We need to give an example of the actual data to show attribute types and meanings. The transaction table has over a million rows like this, with cryptic Czech categories (PRIJEM = credit). We have to translate and aggregate these.
 :::
 
-## What are we predicting?
+## What are we predicting? {.smaller}
 
 ::: {.columns}
 ::: {.column width="50%"}
@@ -131,9 +135,9 @@ Distributions overlap significantly. Loan amount and duration alone cannot separ
 This is the key motivating slide for feature engineering. If the loan contract terms alone could perfectly separate good from bad, we wouldn't need transactions or demographics. The overlap here is the argument for why a rich feature matrix matters.
 :::
 
-## Client demographics
+## Client demographics {.smaller}
 
-![](figures/05_client_demographics.png)
+![](figures/05_client_demographics.png){width="70%"}
 
 - Age ranges broadly (20–70); median is similar for good/bad loans.
 - Gender split is roughly 50/50 for both outcomes.
@@ -145,7 +149,7 @@ Demographics set the context — they describe who the client is. But they're no
 
 ## Transaction patterns
 
-![](figures/06_transactions.png)
+![](figures/06_transactions.png){width="70%"}
 
 - 1M+ rows aggregated into per-loan **summary statistics**.
 - Accounts accumulate **months or years** of history before the loan.
