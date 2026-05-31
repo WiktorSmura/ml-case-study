@@ -4,15 +4,17 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 from sklearn.compose import ColumnTransformer
 from sklearn.dummy import DummyClassifier
 from sklearn.exceptions import ConvergenceWarning
-from sklearn.linear_model import LogisticRegression, RidgeClassifier
-from sklearn.metrics import balanced_accuracy_score, confusion_matrix
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import average_precision_score, confusion_matrix
 from sklearn.model_selection import GridSearchCV, RepeatedStratifiedKFold, cross_val_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, TargetEncoder
 from sklearn.svm import LinearSVC
+from sklearn.tree import DecisionTreeClassifier
 
 # add src dir to imports
 # Find project root by walking upward until pyproject.toml is found
@@ -48,7 +50,7 @@ def grid_values():
     ]
 
 
-def train_and_eval(config, tables):
+def train_and_eval(config: CzechFinancialConfig, tables):
     X, y, meta = build_classification_dataset(config, tables=tables)
 
     print("Original X shape:", X.shape)
@@ -80,7 +82,7 @@ def train_and_eval(config, tables):
     # 4. Build the Preprocessor
     preprocessor = ColumnTransformer(
         transformers=[
-            ("cat", TargetEncoder(target_type="binary", smooth=10.0), cat_cols),
+            ("cat", TargetEncoder(target_type="binary", smooth=10.0, random_state=config.random_state), cat_cols),
             ("cont", StandardScaler(), cont_cols),
             ("bin", "passthrough", bin_cols),
         ]
@@ -96,7 +98,7 @@ def train_and_eval(config, tables):
         penalty="l1", dual=False, C=0.1, class_weight="balanced", max_iter=15000, random_state=config.random_state
     )
 
-    ridge_clf = RidgeClassifier(alpha=1.0, class_weight="balanced", random_state=config.random_state)
+    tree = DecisionTreeClassifier(random_state=config.random_state)
 
     zero_r_baseline = DummyClassifier(strategy="most_frequent")
 
@@ -105,7 +107,7 @@ def train_and_eval(config, tables):
         "Baseline (Majority Class)": zero_r_baseline,
         "L1 Logistic Regression": Pipeline([("preprocess", preprocessor), ("classifier", lasso_lr)]),
         "L1 Linear SVC": Pipeline([("preprocess", preprocessor), ("classifier", linear_svc)]),
-        "L2 Ridge Classifier": Pipeline([("preprocess", preprocessor), ("classifier", ridge_clf)]),
+        "Decistion Tree": Pipeline([("preprocess", preprocessor), ("classifier", tree)]),
     }
 
     # 8. Evaluate Setup (CV strictly on Training Data)
@@ -121,10 +123,12 @@ def train_and_eval(config, tables):
         "L1 Linear SVC": {
             "classifier__C": grid_values(),
         },
-        "L2 Ridge Classifier": {
-            "classifier__alpha": grid_values(),
-        },
+        "Decistion Tree": {"classifier__max_depth": list(range(3, 15))},
     }
+
+    name_mappings = {"L1 Logistic Regression": "logistic", "L1 Linear SVC": "svc"}
+
+    target_name_mappings = {"finished_binary": "finished", "all_binary": "all"}
 
     # ---------------------------------------------------------
     # 10. Execute Grid Search on Train Data
@@ -141,7 +145,7 @@ def train_and_eval(config, tables):
 
         print(f"\n--- Tuning {name} ---")
         grid_search = GridSearchCV(
-            estimator=pipeline, param_grid=param_grids[name], cv=cv, scoring="balanced_accuracy", n_jobs=-1
+            estimator=pipeline, param_grid=param_grids[name], cv=cv, scoring="average_precision", n_jobs=-1
         )
 
         # Fit the grid search strictly on the TRAINING set
@@ -152,12 +156,12 @@ def train_and_eval(config, tables):
         # Store the optimized pipeline
         best_models[name] = grid_search.best_estimator_
 
-        print(f"Best CV Balanced Accuracy: {grid_search.best_score_:.4f}")
+        print(f"Best CV PR-AUC: {grid_search.best_score_:.4f}")
         print(f"Best Parameters: {grid_search.best_params_}")
 
     print("\n--- Baseline CV Evaluation ---")
     baseline_scores = cross_val_score(
-        models["Baseline (Majority Class)"], X_train, y_train, cv=cv, scoring="balanced_accuracy", n_jobs=-1
+        models["Baseline (Majority Class)"], X_train, y_train, cv=cv, scoring="average_precision", n_jobs=-1
     )
     # Fit baseline to use it in final testing
     best_models["Baseline (Majority Class)"] = models["Baseline (Majority Class)"].fit(X_train, y_train)
@@ -172,8 +176,8 @@ def train_and_eval(config, tables):
 
     for name, model in best_models.items():
         y_pred = model.predict(X_test)
-        test_score = balanced_accuracy_score(y_test, y_pred)
-        print(f"{name}: Balanced Accuracy = {test_score:.4f}")
+        test_score = average_precision_score(y_test, y_pred)
+        print(f"{name}: PR-AUC = {test_score:.4f}")
         print("Confusion matrix:")
         print(confusion_matrix(y_test, y_pred))
 
@@ -184,42 +188,190 @@ def train_and_eval(config, tables):
     print("                 Feature Importance Analysis           ")
     print("=======================================================")
 
-    for name, pipeline in best_models.items():
-        if name == "Baseline (Majority Class)":
-            continue
+    with open(f"data_{config.target_mode}.py", "w") as f:
+        for name, pipeline in best_models.items():
+            if name == "Baseline (Majority Class)":
+                continue
 
-        print(f"\n--- {name} Top 10 Features ---")
+            if name == "Decistion Tree":
+                print(f"\n--- {name} Interactive Plotly Export ---")
 
-        # 1. Get feature names out of the ColumnTransformer
-        preprocessor = pipeline.named_steps["preprocess"]
-        feature_names = preprocessor.get_feature_names_out()
+                # 1. Extract model components
+                preprocessor = pipeline.named_steps["preprocess"]
+                feature_names = list(preprocessor.get_feature_names_out())
+                tree_model = pipeline.named_steps["classifier"]
 
-        # 3. Extract the coefficients from the classifier
-        classifier = pipeline.named_steps["classifier"]
-        coefficients = classifier.coef_.flatten()
+                # Extract tree structures
+                children_left = tree_model.tree_.children_left
+                children_right = tree_model.tree_.children_right
+                features = tree_model.tree_.feature
+                thresholds = tree_model.tree_.threshold.copy()  # copy to avoid mutating the original model
+                values = tree_model.tree_.value
 
-        # 4. Build a DataFrame for easy sorting
-        feature_importance = pd.DataFrame(
-            {"Feature": feature_names, "Coefficient": coefficients, "Abs_Coefficient": np.abs(coefficients)}
-        )
+                # 2. Unscale continuous thresholds for tooltips
+                scaler = preprocessor.named_transformers_["cont"]
+                cont_cols = [cols for n, trans, cols in preprocessor.transformers_ if n == "cont"][0]
 
-        # Sort by the absolute magnitude of the coefficient
-        feature_importance = feature_importance.sort_values(by="Abs_Coefficient", ascending=False)
+                for i, feat_idx in enumerate(features):
+                    if feat_idx >= 0:
+                        feat_name = feature_names[feat_idx]
+                        if feat_name.startswith("cont__"):
+                            orig_col = feat_name.replace("cont__", "")
+                            if orig_col in cont_cols:
+                                scaler_idx = cont_cols.index(orig_col)
+                                mean = scaler.mean_[scaler_idx]
+                                scale = scaler.scale_[scaler_idx]
+                                thresholds[i] = thresholds[i] * scale + mean
 
-        # Count how many features the model actually used
-        non_zero_count = (feature_importance["Coefficient"] != 0).sum()
-        print(f"Features utilized (non-zero): {non_zero_count} out of {len(feature_names)}")
+                # 3. Compute Node Coordinates (X, Y) dynamically
+                coords = {}
 
-        non_zero_df = feature_importance[feature_importance["Coefficient"] != 0]
-        # Display the top 10 most impactful features
-        print(
-            non_zero_df[["Feature", "Coefficient"]]
-            .sort_values("Coefficient", ascending=False)
-            .to_string(index=False, float_format=lambda x: f"{x:.25f}")
-        )
+                def compute_layout(node_id, depth=0, left_bound=0.0, right_bound=1.0):
+                    if node_id == -1:
+                        return
+
+                    # X coordinate is the midpoint of the current boundary allocation
+                    x = (left_bound + right_bound) / 2.0
+                    y = -depth  # Root is at 0, deeper nodes go downwards
+                    coords[node_id] = (x, y)
+
+                    # Allocate space split for children
+                    compute_layout(children_left[node_id], depth + 1, left_bound, x)
+                    compute_layout(children_right[node_id], depth + 1, x, right_bound)
+
+                compute_layout(0)  # Start from root node
+
+                # 4. Separate nodes and build links (edges)
+                edge_x, edge_y = [], []
+                node_x, node_y = [], []
+                hover_text, node_color = [], []
+
+                for node_id in range(tree_model.tree_.node_count):
+                    x, y = coords[node_id]
+                    node_x.append(x)
+                    node_y.append(y)
+
+                    # Determine Node details
+                    num_samples = tree_model.tree_.n_node_samples[node_id]
+                    node_val = values[node_id][0]
+                    # Dominant class index
+                    class_idx = np.argmax(node_val)
+                    node_color.append(class_idx)
+
+                    if features[node_id] != -2:  # Internal split node
+                        feat_name = feature_names[features[node_id]]
+                        thresh = thresholds[node_id]
+                        text = f"<b>Node {node_id} (Split)</b><br>Split: {feat_name} ≤ {thresh:.4f}<br>Samples: {num_samples}<br>Distribution: {node_val.tolist()}"  # noqa: E501 line too long
+                    else:  # Leaf node
+                        text = f"<b>Node {node_id} (Leaf)</b><br>Samples: {num_samples}<br>Final Distribution: {node_val.tolist()}<br>Predicted Class: {class_idx}"  # noqa: E501 line too long
+                    hover_text.append(text)
+
+                    # Add line configurations to children
+                    left = children_left[node_id]
+                    right = children_right[node_id]
+
+                    for child in [left, right]:
+                        if child != -1:
+                            cx, cy = coords[child]
+                            edge_x.extend([x, cx, None])  # None prevents drawing continuous artifacts
+                            edge_y.extend([y, cy, None])
+
+                # 5. Construct Plotly Figure
+                fig = go.Figure()
+
+                # Edges (Lines connecting decisions)
+                fig.add_trace(
+                    go.Scatter(x=edge_x, y=edge_y, mode="lines", line=dict(color="#999999", width=1.5), hoverinfo="none")
+                )
+
+                # Nodes (Scatter markers with interactive hover cards)
+                fig.add_trace(
+                    go.Scatter(
+                        x=node_x,
+                        y=node_y,
+                        mode="markers",
+                        marker=dict(
+                            size=18,
+                            color=node_color,
+                            colorscale="Bluered",  # Blue for Class 0, Red for Class 1
+                            line=dict(color="black", width=1),
+                        ),
+                        text=hover_text,
+                        hoverinfo="text",
+                    )
+                )
+
+                # Clean layout geometry for presentations
+                fig.update_layout(
+                    title=f"Interactive Decision - {config.target_mode}",
+                    title_font_size=16,
+                    showlegend=False,
+                    hovermode="closest",
+                    margin=dict(b=20, l=5, r=5, t=40),
+                    xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                    yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                )
+
+                # Save interactive artifact as HTML for Quarto integration
+                fig.write_html(f"interactive_tree_{config.target_mode}.html", full_html=False, include_plotlyjs="cdn")
+                print("Successfully compiled and saved 'interactive_tree.html'")
+                continue
+
+            print(f"\n--- {name} Top 10 Features ---")
+
+            # 1. Get feature names out of the ColumnTransformer
+            preprocessor = pipeline.named_steps["preprocess"]
+            feature_names = preprocessor.get_feature_names_out()
+
+            # 3. Extract the coefficients from the classifier
+            classifier = pipeline.named_steps["classifier"]
+            coefficients = classifier.coef_.flatten()
+
+            # 4. Build a DataFrame for easy sorting
+            feature_importance = pd.DataFrame(
+                {"Feature": feature_names, "Coefficient": coefficients, "Abs_Coefficient": np.abs(coefficients)}
+            )
+
+            # Sort by the absolute magnitude of the coefficient
+            feature_importance = feature_importance.sort_values(by="Abs_Coefficient", ascending=False)
+
+            # Count how many features the model actually used
+            non_zero_count = (feature_importance["Coefficient"] != 0).sum()
+            print(f"Features utilized (non-zero): {non_zero_count} out of {len(feature_names)}")
+
+            non_zero_df = feature_importance[feature_importance["Coefficient"] != 0]
+            # Display the top 10 most impactful features
+            # print(
+            #     non_zero_df[["Feature", "Coefficient"]]
+            #     .sort_values("Coefficient", ascending=False)
+            #     .to_string(index=False, float_format=lambda x: f"{x:.25f}")
+            # )
+
+            sorted_non_zero_df = non_zero_df[["Feature", "Coefficient"]].sort_values("Coefficient", ascending=False)
+
+            identifier = f"{target_name_mappings[config.target_mode]}_{name_mappings[name]}"
+
+            feature_variable = f"features_{identifier} = ["
+            coefs_variable = f"coefs_{identifier} = ["
+
+            for idx, row in sorted_non_zero_df.iterrows():
+                print(row["Feature"], row["Coefficient"])
+                feature_variable += f"\n    '{row['Feature']}',"
+                coefs_variable += f"\n    {row['Coefficient']},"
+
+            # remove trailing comma
+            feature_variable = feature_variable[:-1]
+            coefs_variable = coefs_variable[:-1]
+
+            feature_variable += "\n]\n"
+            coefs_variable += "\n]\n"
+
+            f.write(feature_variable)
+            f.write(coefs_variable)
+            f.write(f"data_{identifier} = (features_{identifier}, coefs_{identifier})\n")
 
 
-def main():
+def main():  #
     tables = load_and_normalize_tables(DATA_DIR)
 
     config = CzechFinancialConfig(
